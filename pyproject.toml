@@ -1,0 +1,17 @@
+[project]
+name = "ibood_poller"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests",
+    "structlog"
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+ibood_hunt_fetcher = "ibood_poller.ibood_hunt_fetcher:main"
