@@ -1,49 +1,19 @@
 import requests
 import json
 import structlog
-import dataclasses
-import logging
 import asyncio
 import random
-import os
-import sys
 from typing import Final
 from ._logging import _setup_logging
 from .ibood_api.api_client import IboodClient
 from .ibood_api.models import IboodDeal
+from .event_saver import EventFileManager, UpsertStatus
 
 # Configure structlog
 _setup_logging()
 logger = structlog.get_logger()
 
 FILTERED_EVENTS_FILE: Final[str] = "filtered_events.json"
-
-class EventFileManager:
-    def __init__(self, filepath: str):
-        self.filepath = filepath
-
-    def _read_file(self) -> list:
-        if os.path.exists(self.filepath):
-            try:
-                with open(self.filepath, 'r') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
-                return []
-        return []
-
-    def _write_file(self, data: list) -> None:
-        with open(self.filepath, 'w') as f:
-            json.dump(data, f, indent=4)
-
-    def has_id(self, event_id: str) -> bool:
-        data = self._read_file()
-        existing_ids = {item.get('id') for item in data if 'id' in item}
-        return event_id in existing_ids
-
-    def add_event(self, event: dict) -> None:
-        data = self._read_file()
-        data.append(event)
-        self._write_file(data)
 
 def main():
     try:
@@ -54,52 +24,50 @@ def main():
 async def async_main():
     client = IboodClient()
     file_manager = EventFileManager(FILTERED_EVENTS_FILE)
-    
+
     while True:
         try:
             response = client.get_live_events()
+            response.raise_for_status()
             logger.info("API request", status_code=response.status_code)
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()  # Parse the JSON response
-                    
-                    # Navigate to the current item
-                    try:
-                        current_item = data["data"]["items"][0]["currentItem"]
-                        # Navigate to the current item safely
-                        items = data.get("data", {}).get("items", [])
-                        if not items:
-                            logger.warning("No items found in response")
-                            continue
-                        
-                        current_item = items[0].get("currentItem")
-                        if not current_item:
-                            logger.warning("No currentItem found in first item")
-                            continue
-                    
-                        # Extract the specific fields
-                        deal: IboodDeal = IboodDeal.from_dict(current_item)
-                        
-                        logger.debug("Filtered current item", data=deal)
-                        
-                        # Check if current ID exists in the persistent file
-                        if not file_manager.has_id(deal.id):
-                            file_manager.add_event(deal.to_dict())
-                            logger.info("New current item added", id=deal.id, name=deal.title)
-                        else:
-                            logger.info("Current item already exists", id=deal.id, name=deal.title)
-                    
-                    except (KeyError, IndexError) as e:
-                        logger.error("Error accessing current item", error=str(e), data=data)
-                except json.JSONDecodeError:
-                    logger.error("Response is not JSON", raw_content=response.text[:1000])
+
+            data = response.json()
+
+            items = data.get("data", {}).get("items", [])
+            if not items:
+                logger.warning("No items found in response")
             else:
-                logger.error("HTTP error", status_code=response.status_code, response_text=response.text[:1000])
-    
+                current_item = items[0].get("currentItem")
+                if not current_item:
+                    logger.warning("No currentItem found in the first item")
+                else:
+                    deal = IboodDeal.from_dict(current_item)
+                    logger.debug("Filtered current item", data=deal)
+
+                    status = file_manager.upsert_event(deal)
+
+                    if status == UpsertStatus.NEW:
+                        logger.info("New deal added", id=deal.id, name=deal.title)
+                    elif status == UpsertStatus.UPDATED:
+                        logger.info(
+                            "Deal updated with new hunt time",
+                            id=deal.id,
+                            name=deal.title,
+                        )
+                    else:  # unchanged
+                        logger.info(
+                            "Deal already exists and is up to date",
+                            id=deal.id,
+                            name=deal.title,
+                        )
         except requests.RequestException as e:
-            logger.error("Error fetching data", error=str(e))
-        
+            # This handles connection errors, timeouts, etc., and HTTP error status codes via raise_for_status()
+            logger.error("HTTP request failed", error=str(e))
+        except json.JSONDecodeError:
+            logger.error("Failed to decode JSON from response.")
+        except (KeyError, IndexError) as e:
+            logger.error("Unexpected data structure in response", error=str(e))
+
         # Wait randomly between 28 and 47 seconds before next poll
         sleep_time = random.randint(28, 47)
         logger.debug("Sleeping before next poll", seconds=sleep_time)

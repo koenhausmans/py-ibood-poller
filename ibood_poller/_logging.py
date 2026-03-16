@@ -33,6 +33,7 @@ def _setup_logging():
     }
 
     logging.basicConfig(stream=sys.stdout, format="%(message)s", level=logging.INFO)
+    # logging.basicConfig(stream=sys.stdout, format="%(message)s", level=logging.DEBUG)
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,

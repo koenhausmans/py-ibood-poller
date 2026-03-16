@@ -1,0 +1,2 @@
+keyword
+keyword A -"exclude deals with this" -abc
