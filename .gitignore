@@ -12,3 +12,4 @@ wheels/
 # Local configuration
 keywords.txt
 filtered_events.json
+__cache__/

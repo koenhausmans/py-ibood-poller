@@ -15,14 +15,16 @@ from typing import List
 from ._logging import _setup_logging
 from .ibood_api.api_client import IboodClient
 from .ibood_api.models import IboodDeal
+from .deal_history import DealHistory
 
 # Configure structlog
 _setup_logging()
 logger = structlog.get_logger()
 
-def generate_html_report(deals: List[IboodDeal]) -> str:
+def generate_html_report(new_deals: List[IboodDeal], other_deals: List[IboodDeal]) -> str:
     """Generates an email-compatible HTML report using an inline-block layout."""
 
+    deals = new_deals + other_deals
     deal_count = len(deals)
     styles = dedent("""
         body { font-family: sans-serif; }
@@ -52,6 +54,8 @@ def generate_html_report(deals: List[IboodDeal]) -> str:
 
     deal_cards_html = []
     for deal in deals:
+        is_new = deal in new_deals
+        card_style = "background: #d9edf7;" if is_new else "background: #eee;"
         keywords_joined = ", ".join(deal.matched_keywords)
 
         title_html = f"<a href='{deal.url}' style='color: #000; text-decoration: none;'>{deal.title}</a>" if deal.url else deal.title
@@ -60,15 +64,12 @@ def generate_html_report(deals: List[IboodDeal]) -> str:
             image_html = f"<img src='{deal.image}' alt='{deal.title}'>"
             if deal.url:
                 image_html = f"<a href='{deal.url}'>{image_html}</a>"
-        keywords_html = f"<p class='keywords'><strong>Matches:</strong> {keywords_joined}</p>" if keywords_joined else ""
 
         deal_cards_html.append(dedent(f"""
-            <div class='deal'>
+            <div class='deal' style='{card_style}'>
                 {image_html}
                 <h3>{title_html}</h3>
-                <p class='deal-brand'>Brand: {deal.brand}</p>
                 <p class='deal-price'>{deal.price}</p>
-                {keywords_html}
             </div>
         """))
 
@@ -114,6 +115,7 @@ def fetch_and_process_deals(keywords: List[str], send_email_flag: bool):
     Fetches all deals, filters them, and optionally sends an email.
     """
     client = IboodClient()
+    deal_history = DealHistory("__cache__/all_deals_history.json")
 
     try:
         response = client.get_all_deals()
@@ -121,59 +123,99 @@ def fetch_and_process_deals(keywords: List[str], send_email_flag: bool):
         logger.info("API request", status_code=response.status_code)
 
         data = response.json()
-
         items = data.get("data", {}).get("items", [])
         if not items:
             logger.warning("No items found in response")
             return
         
-        logger.info(f"Found {len(items)} deals")
+        logger.info(f"Found {len(items)} deals from API")
 
+        # Convert all items to IboodDeal objects first
         all_deals = []
         for item in items:
-            logger.debug("Processing item", item=item)
             try:
                 deal = IboodDeal.from_dict(item)
                 all_deals.append(deal)
             except KeyError as e:
                 logger.warning("Could not parse deal, missing key", key=str(e), deal_data=item)
 
-        filtered_deals = all_deals
+        # Filter deals by keywords
+        matched_deals = []
         if keywords:
-            filtered_deals = []
             for deal in all_deals:
                 deal.find_and_store_matches(keywords)
                 if deal.matched_keywords:
-                    filtered_deals.append(deal)
-            
-            logger.info(f"Found {len(filtered_deals)} deals matching keywords")
+                    matched_deals.append(deal)
+            logger.info(f"Found {len(matched_deals)} deals matching keywords")
+        else:
+            # If no keywords, all deals are considered "matched" for history
+            matched_deals = all_deals
+
+        # Update deal history with the matched IboodDeal objects
+        deal_history.update(matched_deals)
+        deal_history.cleanup_old_deals()
         
-        for deal in filtered_deals:
-            logger.info("Deal found", id=deal.id, name=deal.title, price=deal.price, brand=deal.brand)
+        # Sort and categorize the matched deals
+        keyword_map = {kw: i for i, kw in enumerate(keywords)}
+        new_deals = []
+        other_deals = []
+
+        for deal in matched_deals:
+            # Sort by the first matched keyword's index
+            sort_key = min(keyword_map[kw] for kw in deal.matched_keywords) if deal.matched_keywords else -1
+            deal.sort_key = sort_key
+            
+            log_message = "Deal found"
+            if deal_history.is_new(deal.id):
+                log_message = "New deal found"
+                new_deals.append(deal)
+            else:
+                other_deals.append(deal)
+
+            logger.info(
+                log_message,
+                id=deal.id,
+                name=deal.title,
+                price=deal.price,
+                brand=deal.brand,
+                matches=deal.matched_keywords,
+                url=deal.url
+            )
+
+        new_deals.sort(key=lambda d: d.sort_key)
+        other_deals.sort(key=lambda d: d.sort_key)
+        
+        # The final list of deals to be potentially emailed
+        deals_for_email = new_deals + other_deals
+        logger.info(f"Categorized {len(new_deals)} new deals and {len(other_deals)} other deals.")
 
         if send_email_flag:
-            deals_to_email = [deal for deal in filtered_deals if not deal.soldOut]
-            logger.info(f"Found {len(deals_to_email)} deals that are not sold out")
+            deals_to_email_not_sold_out = [deal for deal in deals_for_email if not deal.soldOut]
+            logger.info(f"Found {len(deals_to_email_not_sold_out)} deals that are not sold out")
 
-            if deals_to_email:
+            if deals_to_email_not_sold_out:
                 gmail_username = os.getenv("GMAIL_USERNAME")
                 gmail_app_password = os.getenv("GMAIL_APP_PASSWORD")
                 gmail_recipient = os.getenv("GMAIL_RECIPIENT")
 
                 if gmail_username and gmail_app_password and gmail_recipient:
                     logger.info("Generating HTML report and sending email...")
-                    html_report = generate_html_report(deals_to_email)
-                    send_email(html_report, gmail_username, gmail_recipient, gmail_app_password, len(deals_to_email))
+                    
+                    new_deals_to_email = [d for d in new_deals if not d.soldOut]
+                    other_deals_to_email = [d for d in other_deals if not d.soldOut]
+
+                    html_report = generate_html_report(new_deals_to_email, other_deals_to_email)
+                    send_email(html_report, gmail_username, gmail_recipient, gmail_app_password, len(deals_to_email_not_sold_out))
                 else:
                     logger.warning("Email credentials not fully configured. Set GMAIL_USERNAME, GMAIL_APP_PASSWORD, and GMAIL_RECIPIENT environment variables.")
             else:
                 logger.info("No deals to send in email.")
 
-
     except requests.RequestException as e:
         logger.error("HTTP request failed", error=str(e))
     except json.JSONDecodeError:
         logger.error("Failed to decode JSON from response.")
+
 
 def main():
     """

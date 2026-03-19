@@ -7,13 +7,13 @@ from typing import Final
 from ._logging import _setup_logging
 from .ibood_api.api_client import IboodClient
 from .ibood_api.models import IboodDeal
-from .event_saver import EventFileManager, UpsertStatus
+from .hunt_history import HuntHistory, UpsertStatus
 
 # Configure structlog
 _setup_logging()
 logger = structlog.get_logger()
 
-FILTERED_EVENTS_FILE: Final[str] = "filtered_events.json"
+FILTERED_EVENTS_FILE: Final[str] = "__cache__/hunt_history.json"
 
 def main():
     try:
@@ -23,7 +23,7 @@ def main():
 
 async def async_main():
     client = IboodClient()
-    file_manager = EventFileManager(FILTERED_EVENTS_FILE)
+    file_manager = HuntHistory(FILTERED_EVENTS_FILE)
 
     while True:
         try:
