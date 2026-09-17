@@ -166,7 +166,7 @@ def fetch_and_process_deals(keywords: List[str], send_email_flag: bool):
             deal.sort_key = sort_key
             
             log_message = "Deal found"
-            if deal_history.is_new(deal.id):
+            if deal_history.is_new(deal):
                 log_message = "New deal found"
                 new_deals.append(deal)
             else:
