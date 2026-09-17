@@ -74,6 +74,7 @@ class IboodDeal:
     classicId: Optional[str]
     slug: Optional[str]
     soldOut: bool
+    product_id: Optional[str]
     matched_keywords: List[str] = field(default_factory=list, init=False, repr=False)
 
     @classmethod
@@ -102,6 +103,7 @@ class IboodDeal:
             classicId=data.get("classicId"),
             slug=data.get("slug"),
             soldOut=data.get("soldOut", False),
+            product_id=data.get("productId"),
         )
 
     def to_dict(self) -> dict:
